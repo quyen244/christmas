@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef, useState } from 'react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { TreeMode } from '../types';
@@ -8,20 +7,91 @@ interface GestureControllerProps {
   currentMode: TreeMode;
   onHandPosition?: (x: number, y: number, detected: boolean) => void;
   onTwoHandsDetected?: (detected: boolean) => void;
+  onTwoThumbsUp?: () => void;
+  onOneThumbUp?: () => void;
+  onClosedFist?: () => void;
 }
 
-export const GestureController: React.FC<GestureControllerProps> = ({ onModeChange, currentMode, onHandPosition, onTwoHandsDetected }) => {
+// --- HELPER FUNCTIONS ---
+
+const getDist = (p1: {x: number, y: number}, p2: {x: number, y: number}) => {
+    return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+};
+
+// Logic Thumb Up (giữ nguyên độ chính xác để mở thư)
+const isThumbUpGesture = (landmarks: any[]) => {
+  const wrist = landmarks[0];
+  const thumbTip = landmarks[4];
+  const thumbBase = landmarks[2];
+
+  // 1. Ngón cái duỗi
+  const isThumbExtended = getDist(thumbTip, wrist) > getDist(thumbBase, wrist) * 1.2;
+
+  // 2. Các ngón khác gập
+  const tips = [8, 12, 16, 20];
+  const pips = [6, 10, 14, 18]; 
+  
+  let foldedCount = 0;
+  for (let i = 0; i < 4; i++) {
+    if (getDist(landmarks[tips[i]], wrist) < getDist(landmarks[pips[i]], wrist) * 1.1) { 
+        foldedCount++;
+    }
+  }
+
+  // Yêu cầu chặt chẽ: Ngón cái duỗi VÀ 4 ngón kia gập
+  return isThumbExtended && foldedCount >= 4; 
+};
+
+// Logic đếm số ngón tay đang duỗi (Logic cũ - Đơn giản & Hiệu quả)
+const countExtendedFingers = (landmarks: any[]) => {
+    const wrist = landmarks[0];
+    const tips = [8, 12, 16, 20]; // Đầu ngón: Trỏ, Giữa, Nhẫn, Út
+    const bases = [5, 9, 13, 17]; // Khớp nối bàn tay
+    
+    let count = 0;
+    
+    // Check 4 ngón chính
+    for (let i = 0; i < 4; i++) {
+        // Nếu đầu ngón xa cổ tay hơn khớp nối đáng kể -> Duỗi
+        if (getDist(landmarks[tips[i]], wrist) > getDist(landmarks[bases[i]], wrist) * 1.2) {
+            count++;
+        }
+    }
+    
+    // Check ngón cái (đơn giản hơn logic ThumbUp)
+    const thumbTip = landmarks[4];
+    const thumbBase = landmarks[2];
+    if (getDist(thumbTip, wrist) > getDist(thumbBase, wrist) * 1.2) {
+        count++;
+    }
+    
+    return count;
+};
+
+
+export const GestureController: React.FC<GestureControllerProps> = ({ 
+    onModeChange, 
+    currentMode, 
+    onHandPosition, 
+    onTwoHandsDetected, 
+    onTwoThumbsUp,
+    onOneThumbUp,
+    onClosedFist
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoaded, setIsLoaded] = useState(false);
-  const [gestureStatus, setGestureStatus] = useState<string>("Initializing...");
+  const [debugStatus, setDebugStatus] = useState("Initializing...");
   const [handPos, setHandPos] = useState<{ x: number; y: number } | null>(null);
   const lastModeRef = useRef<TreeMode>(currentMode);
   
-  // Debounce logic refs
-  const openFrames = useRef(0);
+  // Counters check
+  const twoThumbFrames = useRef(0);
+  const oneThumbFrames = useRef(0);
   const closedFrames = useRef(0);
-  const CONFIDENCE_THRESHOLD = 5; // Number of consecutive frames to confirm gesture
+  const openFrames = useRef(0);
+  
+  const THRESHOLD = 8; 
 
   useEffect(() => {
     let handLandmarker: HandLandmarker | null = null;
@@ -29,13 +99,9 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onModeChan
 
     const setupMediaPipe = async () => {
       try {
-        // Use jsDelivr CDN (accessible in China)
         const vision = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
         );
-
-        // Use local model file to avoid loading from Google Storage (blocked in China)
-        // Model file should be downloaded using: npm run download-model or download-model.bat/.sh
         handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
             modelAssetPath: `/models/hand_landmarker.task`,
@@ -44,13 +110,10 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onModeChan
           runningMode: "VIDEO",
           numHands: 2
         });
-
         startWebcam();
       } catch (error) {
         console.error("Error initializing MediaPipe:", error);
-        console.warn("Gesture control is unavailable. The app will still work without it.");
-        setGestureStatus("Gesture control unavailable");
-        // Don't block the app if gesture control fails
+        setDebugStatus("Error Loading Model");
       }
     };
 
@@ -60,273 +123,191 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onModeChan
           const stream = await navigator.mediaDevices.getUserMedia({
             video: { width: 320, height: 240, facingMode: "user" }
           });
-          
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
             videoRef.current.addEventListener("loadeddata", predictWebcam);
             setIsLoaded(true);
-            setGestureStatus("Waiting for hand...");
+            setDebugStatus("Waiting for hands...");
           }
         } catch (err) {
-          console.error("Error accessing webcam:", err);
-          setGestureStatus("Permission Denied");
+            setDebugStatus("Camera Denied");
         }
       }
-    };
-
-    // Draw a single hand without clearing canvas
-    const drawSingleHandSkeleton = (landmarks: any[], ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
-      // Hand connections (MediaPipe hand model)
-      const connections = [
-        // Thumb
-        [0, 1], [1, 2], [2, 3], [3, 4],
-        // Index finger
-        [0, 5], [5, 6], [6, 7], [7, 8],
-        // Middle finger
-        [0, 9], [9, 10], [10, 11], [11, 12],
-        // Ring finger
-        [0, 13], [13, 14], [14, 15], [15, 16],
-        // Pinky
-        [0, 17], [17, 18], [18, 19], [19, 20],
-        // Palm
-        [5, 9], [9, 13], [13, 17]
-      ];
-
-      // Draw connections (lines)
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#D4AF37'; // Gold color
-      connections.forEach(([start, end]) => {
-        const startPoint = landmarks[start];
-        const endPoint = landmarks[end];
-        
-        ctx.beginPath();
-        ctx.moveTo(startPoint.x * canvas.width, startPoint.y * canvas.height);
-        ctx.lineTo(endPoint.x * canvas.width, endPoint.y * canvas.height);
-        ctx.stroke();
-      });
-
-      // Draw landmarks (points)
-      landmarks.forEach((landmark, index) => {
-        const x = landmark.x * canvas.width;
-        const y = landmark.y * canvas.height;
-        
-        ctx.beginPath();
-        ctx.arc(x, y, 3, 0, 2 * Math.PI);
-        
-        // Use green for all points
-        ctx.fillStyle = '#228B22'; // Forest green color
-        ctx.fill();
-        
-        // Add outline
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 0.5;
-        ctx.stroke();
-      });
-    };
-
-    // Draw all detected hands
-    const drawAllHands = (allLandmarks: any[][]) => {
-      if (!canvasRef.current || !videoRef.current) return;
-      
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      // Set canvas size to match video
-      canvas.width = videoRef.current.videoWidth;
-      canvas.height = videoRef.current.videoHeight;
-
-      // Clear canvas once
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      // Draw each hand
-      allLandmarks.forEach(landmarks => {
-        drawSingleHandSkeleton(landmarks, ctx, canvas);
-      });
     };
 
     const predictWebcam = () => {
       if (!handLandmarker || !videoRef.current) return;
-
       const startTimeMs = performance.now();
-      if (videoRef.current.videoWidth > 0) { // Ensure video is ready
+      if (videoRef.current.videoWidth > 0) {
         const result = handLandmarker.detectForVideo(videoRef.current, startTimeMs);
-
-        if (result.landmarks && result.landmarks.length > 0) {
-          // Check if two hands are detected
-          const twoHandsDetected = result.landmarks.length >= 2;
-          if (onTwoHandsDetected) {
-            onTwoHandsDetected(twoHandsDetected);
-          }
-
-          // Draw all detected hands at once
-          drawAllHands(result.landmarks);
-          
-          // Use first hand for gesture detection
-          const landmarks = result.landmarks[0];
-          detectGesture(landmarks);
-        } else {
-            setGestureStatus("No hand detected");
-            setHandPos(null); // Clear hand position when no hand detected
-            if (onHandPosition) {
-              onHandPosition(0.5, 0.5, false); // No hand detected
-            }
-            if (onTwoHandsDetected) {
-              onTwoHandsDetected(false);
-            }
-            // Clear canvas when no hand detected
-            if (canvasRef.current) {
-              const ctx = canvasRef.current.getContext('2d');
-              if (ctx) {
-                ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-              }
-            }
-            // Reset counters if hand is lost? 
-            // Better to keep them to prevent flickering if hand blips out for 1 frame
-            openFrames.current = Math.max(0, openFrames.current - 1);
-            closedFrames.current = Math.max(0, closedFrames.current - 1);
+        if (result.landmarks) {
+            drawAllHands(result.landmarks);
+            handleGestures(result.landmarks);
         }
       }
-
       animationFrameId = requestAnimationFrame(predictWebcam);
     };
 
-    const detectGesture = (landmarks: any[]) => {
-      // 0 is Wrist
-      // Tips: 8 (Index), 12 (Middle), 16 (Ring), 20 (Pinky)
-      // Bases (MCP): 5, 9, 13, 17
-      
-      const wrist = landmarks[0];
-      
-      // Calculate palm center (average of wrist and finger bases)
-      // Finger bases (MCP joints): 5, 9, 13, 17
-      const palmCenterX = (landmarks[0].x + landmarks[5].x + landmarks[9].x + landmarks[13].x + landmarks[17].x) / 5;
-      const palmCenterY = (landmarks[0].y + landmarks[5].y + landmarks[9].y + landmarks[13].y + landmarks[17].y) / 5;
-      
-      // Send hand position for camera control
-      // Normalize coordinates: x and y are in [0, 1], center at (0.5, 0.5)
-      setHandPos({ x: palmCenterX, y: palmCenterY });
-      if (onHandPosition) {
-        onHandPosition(palmCenterX, palmCenterY, true);
-      }
-      
-      const fingerTips = [8, 12, 16, 20];
-      const fingerBases = [5, 9, 13, 17];
-      
-      let extendedFingers = 0;
+    const handleGestures = (landmarks: any[][]) => {
+        const count = landmarks.length;
+        onTwoHandsDetected?.(count === 2);
 
-      for (let i = 0; i < 4; i++) {
-        const tip = landmarks[fingerTips[i]];
-        const base = landmarks[fingerBases[i]];
-        
-        // Calculate distance from wrist to tip vs wrist to base
-        const distTip = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
-        const distBase = Math.hypot(base.x - wrist.x, base.y - wrist.y);
-        
-        // Heuristic: If tip is significantly further from wrist than base, it's extended
-        if (distTip > distBase * 1.5) { // 1.5 multiplier is a safe heuristic for extension
-          extendedFingers++;
+        // --- CẬP NHẬT VỊ TRÍ TAY ---
+        if (count > 0) {
+            const hand = landmarks[0];
+            const palmX = (hand[0].x + hand[9].x) / 2;
+            const palmY = (hand[0].y + hand[9].y) / 2;
+            setHandPos({ x: palmX, y: palmY });
+            onHandPosition?.(palmX, palmY, true);
+        } else {
+            onHandPosition?.(0.5, 0.5, false);
         }
-      }
-      
-      // Thumb check (Tip 4 vs Base 2)
-      const thumbTip = landmarks[4];
-      const thumbBase = landmarks[2];
-      const distThumbTip = Math.hypot(thumbTip.x - wrist.x, thumbTip.y - wrist.y);
-      const distThumbBase = Math.hypot(thumbBase.x - wrist.x, thumbBase.y - wrist.y);
-      if (distThumbTip > distThumbBase * 1.2) extendedFingers++;
 
-      // DECISION
-      if (extendedFingers >= 4) {
-        // OPEN HAND -> UNLEASH (CHAOS)
-        openFrames.current++;
-        closedFrames.current = 0;
-        
-        setGestureStatus("Detected: OPEN (Unleash)");
+        // --- GESTURE LOGIC ---
 
-        if (openFrames.current > CONFIDENCE_THRESHOLD) {
-            if (lastModeRef.current !== TreeMode.CHAOS) {
-                lastModeRef.current = TreeMode.CHAOS;
-                onModeChange(TreeMode.CHAOS);
+        // 1. Ưu tiên cao nhất: 2 THUMB UP (MỞ QUÀ)
+        if (count === 2) {
+            if (isThumbUpGesture(landmarks[0]) && isThumbUpGesture(landmarks[1])) {
+                twoThumbFrames.current++;
+                if (twoThumbFrames.current > THRESHOLD) {
+                    setDebugStatus("🎁 2 Thumbs: OPEN GIFT");
+                    onTwoThumbsUp?.();
+                    oneThumbFrames.current = 0;
+                    return; 
+                }
+            } else {
+                twoThumbFrames.current = 0;
+            }
+        } else {
+            twoThumbFrames.current = 0;
+        }
+
+        // 2. Logic cho 1 tay
+        // Tìm xem có cử chỉ nào xuất hiện không
+        let detectedOneThumbUp = false;
+        let extendedFingers = 0;
+
+        // Lấy thông số từ tay đầu tiên (hoặc duyệt tất cả để tìm ThumbUp)
+        for (const hand of landmarks) {
+            if (isThumbUpGesture(hand)) {
+                detectedOneThumbUp = true;
+                break; // Ưu tiên tìm thumb up trước
+            }
+            // Nếu không phải ThumbUp, đếm số ngón tay của tay đầu tiên để điều khiển cây
+            if (hand === landmarks[0]) {
+                extendedFingers = countExtendedFingers(hand);
             }
         }
 
-      } else if (extendedFingers <= 1) {
-        // CLOSED FIST -> RESTORE (FORMED)
-        closedFrames.current++;
-        openFrames.current = 0;
-        
-        setGestureStatus("Detected: CLOSED (Restore)");
+        if (detectedOneThumbUp) {
+            // --- TRƯỜNG HỢP: 1 THUMB UP (MỞ THƯ) ---
+            oneThumbFrames.current++;
+            closedFrames.current = 0;
+            openFrames.current = 0;
 
-        if (closedFrames.current > CONFIDENCE_THRESHOLD) {
-            if (lastModeRef.current !== TreeMode.FORMED) {
-                lastModeRef.current = TreeMode.FORMED;
-                onModeChange(TreeMode.FORMED);
+            if (oneThumbFrames.current > THRESHOLD) {
+                setDebugStatus("👍 1 Thumb: READ LETTER");
+                onOneThumbUp?.();
+            }
+        } else {
+            oneThumbFrames.current = 0;
+
+            // --- TRƯỜNG HỢP: NẮM ĐẤM / THU CÂY (Dựa vào số ngón tay <= 1) ---
+            // Đây là logic cũ: chỉ cần ít hơn hoặc bằng 1 ngón mở là tính nắm đấm
+            if (extendedFingers <= 1) {
+                closedFrames.current++;
+                openFrames.current = 0;
+
+                if (closedFrames.current > THRESHOLD) {
+                    setDebugStatus(`✊ Fist (${extendedFingers}): FORM TREE`);
+                    onClosedFist?.();
+                    
+                    if (lastModeRef.current !== TreeMode.FORMED) {
+                        lastModeRef.current = TreeMode.FORMED;
+                        onModeChange(TreeMode.FORMED);
+                    }
+                }
+            }
+            // --- TRƯỜNG HỢP: MỞ TAY / BUNG CÂY (>= 4 ngón) ---
+            else if (extendedFingers >= 4) {
+                openFrames.current++;
+                closedFrames.current = 0;
+
+                if (openFrames.current > THRESHOLD) {
+                    setDebugStatus(`🖐 Open (${extendedFingers}): CHAOS`);
+                    
+                    if (lastModeRef.current !== TreeMode.CHAOS) {
+                        lastModeRef.current = TreeMode.CHAOS;
+                        onModeChange(TreeMode.CHAOS);
+                    }
+                }
+            } else {
+                // Trạng thái trung gian (2-3 ngón)
+                closedFrames.current = 0;
+                openFrames.current = 0;
+                if (twoThumbFrames.current === 0) setDebugStatus("Detected: Moving...");
             }
         }
-      } else {
-        // Ambiguous
-        setGestureStatus("Detected: ...");
-        openFrames.current = 0;
-        closedFrames.current = 0;
-      }
+    };
+
+    const drawAllHands = (allLandmarks: any[][]) => {
+        if (!canvasRef.current || !videoRef.current) return;
+        const ctx = canvasRef.current.getContext('2d');
+        if (!ctx) return;
+        canvasRef.current.width = videoRef.current.videoWidth;
+        canvasRef.current.height = videoRef.current.videoHeight;
+        const width = canvasRef.current.width;
+        const height = canvasRef.current.height;
+        ctx.clearRect(0, 0, width, height);
+        allLandmarks.forEach(landmarks => drawSkeleton(ctx, landmarks, width, height));
+    };
+
+    const drawSkeleton = (ctx: CanvasRenderingContext2D, landmarks: any[], w: number, h: number) => {
+        const connections = [
+            [0, 1], [1, 2], [2, 3], [3, 4], 
+            [0, 5], [5, 6], [6, 7], [7, 8], 
+            [0, 9], [9, 10], [10, 11], [11, 12], 
+            [0, 13], [13, 14], [14, 15], [15, 16], 
+            [0, 17], [17, 18], [18, 19], [19, 20], 
+            [5, 9], [9, 13], [13, 17], [0, 17] 
+        ];
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#D4AF37';
+        connections.forEach(([start, end]) => {
+            const p1 = landmarks[start];
+            const p2 = landmarks[end];
+            ctx.beginPath();
+            ctx.moveTo(p1.x * w, p1.y * h);
+            ctx.lineTo(p2.x * w, p2.y * h);
+            ctx.stroke();
+        });
+        ctx.fillStyle = '#228B22';
+        landmarks.forEach((p) => {
+            ctx.beginPath();
+            ctx.arc(p.x * w, p.y * h, 3, 0, 2 * Math.PI);
+            ctx.fill();
+        });
     };
 
     setupMediaPipe();
+    return () => { cancelAnimationFrame(animationFrameId); if (handLandmarker) handLandmarker.close(); };
+  }, []); 
 
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-      if (handLandmarker) handLandmarker.close();
-    };
-  }, [onModeChange]);
-
-  // Sync ref with prop updates to prevent overriding in closure
-  useEffect(() => {
-    lastModeRef.current = currentMode;
-  }, [currentMode]);
+  useEffect(() => { lastModeRef.current = currentMode; }, [currentMode]);
 
   return (
     <div className="absolute top-6 right-[8%] z-50 flex flex-col items-end pointer-events-none">
-
-      
-      {/* Camera Preview Frame */}
+      <div className="mb-2 px-3 py-1 bg-black/80 border border-[#D4AF37] rounded text-[#D4AF37] text-xs font-mono shadow-lg">
+        STATUS: {debugStatus}
+      </div>
       <div className="relative w-[18.75vw] h-[14.0625vw] border-2 border-[#D4AF37] rounded-lg overflow-hidden shadow-[0_0_20px_rgba(212,175,55,0.3)] bg-black">
-        {/* Decorative Lines */}
         <div className="absolute inset-0 border border-[#F5E6BF]/20 m-1 rounded-sm z-10"></div>
-        
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className={`w-full h-full object-cover transform -scale-x-100 transition-opacity duration-1000 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
-        />
-        
-        {/* Canvas for hand skeleton overlay */}
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 w-full h-full object-cover transform -scale-x-100 pointer-events-none z-20"
-        />
-        
-        {/* Hand Position Debug */}
-        {/* {handPos && (
-          <div className="absolute top-2 left-2 text-[10px] text-[#D4AF37] bg-black/70 px-2 py-1 rounded font-mono">
-            X: {handPos.x.toFixed(2)} Y: {handPos.y.toFixed(2)}
-          </div>
-        )} */}
-        
-        {/* Hand Position Indicator */}
+        <video ref={videoRef} autoPlay playsInline muted className={`w-full h-full object-cover transform -scale-x-100 transition-opacity duration-1000 ${isLoaded ? 'opacity-100' : 'opacity-0'}`} />
+        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover transform -scale-x-100 pointer-events-none z-20" />
         {handPos && (
-          <div 
-            className="absolute w-2 h-2 bg-[#D4AF37] rounded-full border border-white"
-            style={{
-              left: `${(1 - handPos.x) * 100}%`,
-              top: `${handPos.y * 100}%`,
-              transform: 'translate(-50%, -50%)'
-            }}
-          />
+          <div className="absolute w-3 h-3 bg-[#D4AF37] rounded-full border-2 border-white shadow-[0_0_10px_#D4AF37] z-30 transition-all duration-100 ease-out"
+            style={{ left: `${(1 - handPos.x) * 100}%`, top: `${handPos.y * 100}%`, transform: 'translate(-50%, -50%)' }} />
         )}
-    
       </div>
     </div>
   );

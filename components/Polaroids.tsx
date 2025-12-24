@@ -188,6 +188,8 @@ export const Polaroids: React.FC<PolaroidsProps> = ({ mode, uploadedPhotos, twoH
       return [];
     }
 
+    
+
     const data: PhotoData[] = [];
     const height = 9; // Range of height on tree
     const maxRadius = 5.0; // Slightly outside the foliage radius (which is approx 5 at bottom)
@@ -236,7 +238,10 @@ export const Polaroids: React.FC<PolaroidsProps> = ({ mode, uploadedPhotos, twoH
         targetPos,
         speed: 0.8 + Math.random() * 1.5 // Variable speed
       });
+
     }
+
+  
     return data;
   }, [uploadedPhotos]);
 

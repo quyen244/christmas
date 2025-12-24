@@ -95,7 +95,7 @@ export const Foliage: React.FC<FoliageProps> = ({ mode, count }) => {
     const rnd = new Float32Array(count);
 
     const goldenRatio = (1 + Math.sqrt(5)) / 2;
-    const height = 12;
+    const height = 13;
     const maxRadius = 5;
 
     for (let i = 0; i < count; i++) {

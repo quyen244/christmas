@@ -3,7 +3,6 @@ import React, { useState, Suspense, useEffect } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Loader } from '@react-three/drei';
 import { Experience } from './components/Experience';
-import { UIOverlay } from './components/UIOverlay';
 import { GestureController } from './components/GestureController';
 import { TreeMode } from './types';
 
@@ -53,6 +52,20 @@ export default function App() {
   const [isSharedView, setIsSharedView] = useState(false);
   const [twoHandsDetected, setTwoHandsDetected] = useState(false);
   const [closestPhoto, setClosestPhoto] = useState<string | null>(null);
+
+  const [giftStage, setGiftStage] = useState<
+    'IDLE' | 'GIFT_OPENED' | 'LETTER_READY' | 'LETTER_OPENED'
+  >('IDLE');
+
+   // 🎁 HÀM DUY NHẤT MỞ QUÀ
+   const openGift = () => {
+    if (giftStage !== 'IDLE') return;
+    setGiftStage('GIFT_OPENED');
+
+    setTimeout(() => {
+      setGiftStage('LETTER_READY');
+    }, 1500);
+  };  
 
   // Check for share parameter in URL on mount
   useEffect(() => {
@@ -127,7 +140,14 @@ export default function App() {
           shadows
         >
           <Suspense fallback={null}>
-            <Experience mode={mode} handPosition={handPosition} uploadedPhotos={uploadedPhotos} twoHandsDetected={twoHandsDetected} onClosestPhotoChange={handleClosestPhotoChange} />
+            <Experience mode={mode}
+                  handPosition={handPosition}
+                  uploadedPhotos={uploadedPhotos}
+                  twoHandsDetected={twoHandsDetected}
+                  onClosestPhotoChange={handleClosestPhotoChange}
+                  giftStage={giftStage}
+                  setGiftStage={setGiftStage}
+             />
           </Suspense>
         </Canvas>
       </ErrorBoundary>
@@ -139,26 +159,22 @@ export default function App() {
         dataStyles={{ color: '#D4AF37', fontFamily: 'Cinzel' }}
       />
       
-      <UIOverlay 
-        mode={mode} 
-        onToggle={toggleMode} 
-        onPhotosUpload={handlePhotosUpload} 
-        hasPhotos={uploadedPhotos.length > 0}
-        uploadedPhotos={uploadedPhotos}
-        isSharedView={isSharedView}
-      />
-      
       {/* Loading indicator for shared photos */}
       {isLoadingShare && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80">
           <div className="text-[#D4AF37] font-serif text-xl">
-            加载分享的照片中...
+           'Tôi tên là Nguyễn Văn Quyền'
           </div>
         </div>
       )}
       
       {/* Gesture Control Module */}
-      <GestureController currentMode={mode} onModeChange={setMode} onHandPosition={handleHandPosition} onTwoHandsDetected={handleTwoHandsDetected} />
+      <GestureController 
+            currentMode={mode} 
+            onModeChange={setMode} 
+            onHandPosition={handleHandPosition}   
+            onTwoHandsDetected={handleTwoHandsDetected}  
+            onTwoThumbsUp={openGift}/>
       
       {/* Photo Overlay - Shows when two hands detected */}
       {closestPhoto && (
